@@ -22,7 +22,7 @@ var rooms = {};
 var users = {};
 
 //Default room.
-rooms.lobby = new Room();
+rooms.lobby = new Room("lobby");
 rooms.lobby.setTopic("Welcome to the lobby!");
 
 io.on("connection", function (socket) {
@@ -30,8 +30,9 @@ io.on("connection", function (socket) {
   socket.on("adduser", function (username, fn) {
     //Check if username is avaliable.
     if (
+      username &&
       users[username] === undefined &&
-      username.toLowerCase != "server" &&
+      username.toLowerCase() != "server" &&
       username.length < 21
     ) {
       socket.username = username;
@@ -50,99 +51,111 @@ io.on("connection", function (socket) {
 
   //When a user joins a room this processes the request.
   socket.on("joinroom", function (joinObj, fn) {
-    var room = joinObj.room;
-    var pass = joinObj.pass;
-    var accepted = true;
-    var reason;
+    if (!socket.username) {
+      console.log("joinroom: User not authenticated");
+      return fn(false, "Not authenticated"); // Adduser hasn't been called
+    }
+    if (!joinObj) {
+      console.log("joinroom: no payload");
+      return; // no payload
+    }
+    const { room, pass } = joinObj;
+    if (!room) {
+      console.log("joinroom: wrong payload", joinObj);
+      return fn(false, "Room name missing"); // Missing data in payload
+    }
 
     //If the room does not exist
     if (rooms[room] === undefined) {
-      rooms[room] = new Room();
+      const newRoom = new Room(room);
+      rooms[room] = newRoom;
       //Op the user if he creates the room.
-      rooms[room].ops[socket.username] = socket.username;
+      newRoom.addOp(socket.username);
       //If the user wants to password protect the room we set the password.
-      if (pass !== undefined) {
-        rooms[room].setPassword(pass);
+      if (pass) {
+        newRoom.setPassword(pass);
       }
       //Keep track of the room in the user object.
       users[socket.username].channels[room] = room;
       //Send the room information to the client.
       fn(true);
-      io.sockets.emit("updateusers", room, rooms[room].users, rooms[room].ops);
+      io.sockets.emit(
+        "updateusers",
+        room,
+        newRoom.users,
+        newRoom.ops,
+        newRoom.banned
+      );
       //Update topic
-      socket.emit("updatetopic", room, rooms[room].topic, socket.username);
+      socket.emit("updatetopic", room, newRoom.topic, socket.username);
       io.sockets.emit("servermessage", "join", room, socket.username);
     } else {
-      //If the room isn't locked we set accepted to true.
-      if (rooms[room].locked === false) {
-        accepted = true;
-      }
+      const r = rooms[room];
       //Check if user submits the correct password
-      else {
-        //If it doesnt match we set accepted to false.
-        if (pass != rooms[room].password) {
-          accepted = false;
-          reason = "wrong password";
-        }
+      if (r.locked && pass !== r.password) {
+        return fn(false, "Wrong password");
+      }
+      //Check if the user has been added to the ban list.
+      if (r.banned[socket.username]) {
+        return fn(false, "Banned");
       }
 
-      //Check if the user has been added to the ban list.
-      if (rooms[room].banned[socket.username] !== undefined) {
-        accepted = false;
-        reason = "banned";
-      }
-      //If accepted is set to true at this point the user is allowed to join the room.
-      if (accepted) {
-        //We need to let the server know beforehand so that he starts to prepare the client template.
-        fn(true);
-        //Add user to room.
-        rooms[room].addUser(socket.username);
-        //Keep track of the room in the user object.
-        users[socket.username].channels[room] = room;
-        //Send the room information to the client.
-        io.sockets.emit(
-          "updateusers",
-          room,
-          rooms[room].users,
-          rooms[room].ops
-        );
-        socket.emit("updatechat", room, rooms[room].messageHistory);
-        socket.emit("updatetopic", room, rooms[room].topic, socket.username);
-        io.sockets.emit("servermessage", "join", room, socket.username);
-      }
-      fn(false, reason);
+      //We need to let the server know beforehand so that he starts to prepare the client template.
+      fn(true);
+      //Add user to room.
+      r.addUser(socket.username);
+      //Keep track of the room in the user object.
+      users[socket.username].channels[room] = room;
+      //Send the room information to the client.
+      io.sockets.emit("updateusers", room, r.users, r.ops, r.banned);
+      socket.emit("updatechat", room, r.messageHistory);
+      socket.emit("updatetopic", room, r.topic, socket.username);
+      io.sockets.emit("servermessage", "join", room, socket.username);
     }
   });
 
   // when the client emits 'sendchat', this listens and executes
   socket.on("sendmsg", function (data) {
-    var userAllowed = false;
+    if (!socket.username) {
+      console.log("sendmsg: User not authenticated");
+      return; // Adduser hasn't been called
+    }
+    if (!data) {
+      console.log("sendmsg: no payload");
+      return; // no payload
+    }
+    const { roomName, msg } = data;
+    if (!roomName || !msg) {
+      console.log("sendmsg: wrong payload", data);
+      return; // Missing data in payload
+    }
 
     //Check if user is allowed to send message.
-    if (rooms[data.roomName].users[socket.username] !== undefined) {
-      userAllowed = true;
-    }
-    if (rooms[data.roomName].ops[socket.username] !== undefined) {
-      userAllowed = true;
-    }
+    if (users[socket.username].channels[roomName] !== roomName) return;
 
-    if (userAllowed) {
-      //Update the message history for the room that the user sent the message to.
-      var messageObj = {
-        nick: socket.username,
-        timestamp: new Date(),
-        message: data.msg.substring(0, 200),
-      };
-      rooms[data.roomName].addMessage(messageObj);
-      io.sockets.emit(
-        "updatechat",
-        data.roomName,
-        rooms[data.roomName].messageHistory
-      );
-    }
+    //Update the message history for the room that the user sent the message to.
+    var messageObj = {
+      nick: socket.username,
+      timestamp: new Date(),
+      message: msg.substring(0, 200),
+    };
+    rooms[roomName].addMessage(messageObj);
+    io.sockets.emit("updatechat", roomName, rooms[roomName].messageHistory);
   });
 
   socket.on("privatemsg", function (msgObj, fn) {
+    if (!socket.username) {
+      console.log("privatemsg: User not authenticated");
+      return fn(false); // Adduser hasn't been called
+    }
+    if (!msgObj) {
+      console.log("privatemsg: no payload");
+      return fn(false); // no payload
+    }
+    if (!msgObj.message) {
+      console.log("privatemsg: wrong payload", msgObj);
+      return fn(false); // Missing data in payload
+    }
     //If user exists in global user list.
     if (users[msgObj.nick] !== undefined) {
       //Send the message only to this user.
@@ -159,13 +172,22 @@ io.on("connection", function (socket) {
 
   //When a user leaves a room this gets performed.
   socket.on("partroom", function (room) {
+    if (!socket.username) {
+      console.log("partroom: User not authenticated");
+      return; // Adduser hasn't been called
+    }
     //remove the user from the room roster and room op roster.
-    delete rooms[room].users[socket.username];
-    delete rooms[room].ops[socket.username];
+    rooms[room].removeUser(socket.username);
     //Remove the channel from the user object in the global user roster.
     delete users[socket.username].channels[room];
     //Update the userlist in the room.
-    io.sockets.emit("updateusers", room, rooms[room].users, rooms[room].ops);
+    io.sockets.emit(
+      "updateusers",
+      room,
+      rooms[room].users,
+      rooms[room].ops,
+      rooms[room].banned
+    );
     io.sockets.emit("servermessage", "part", room, socket.username);
   });
 
@@ -176,13 +198,13 @@ io.on("connection", function (socket) {
       //chosing a username, so we just close the socket without any cleanup.
       for (var room in users[socket.username].channels) {
         //Remove the user from users/ops lists in the rooms he's currently in.
-        delete rooms[room].users[socket.username];
-        delete rooms[room].ops[socket.username];
+        rooms[room].removeUser(socket.username);
         io.sockets.emit(
           "updateusers",
           room,
           rooms[room].users,
-          rooms[room].ops
+          rooms[room].ops,
+          rooms[room].banned
         );
       }
 
@@ -200,24 +222,29 @@ io.on("connection", function (socket) {
 
   //When a user tries to kick another user this gets performed.
   socket.on("kick", function (kickObj, fn) {
-    console.log(
-      socket.username + " kicked " + kickObj.user + " from " + kickObj.room
-    );
-
-    if (rooms[kickObj.room].ops[socket.username] !== undefined) {
+    if (!socket.username) {
+      console.log("kick: User not authenticated");
+      return fn(false); // Adduser hasn't been called
+    }
+    if (!kickObj) {
+      console.log("kick: no payload");
+      return fn(false); // No payload
+    }
+    const { room, user } = kickObj;
+    if (!room || !user) {
+      console.log("kick: wrong payload", kickObj);
+      return fn(false); // Wrong payload
+    }
+    const r = rooms[room];
+    if (r.ops[socket.username]) {
+      //Remove the channel from the user in the global user roster.
+      delete users[user].channels[room];
       //Remove the user from the room roster.
-      delete rooms[kickObj.room].users[kickObj.user];
-      //Remove the user from the ops roster.
-      delete rooms[kickObj.room].ops[kickObj.user];
+      r.removeUser(user);
       //Broadcast to the room who got kicked.
-      io.sockets.emit("kicked", kickObj.room, kickObj.user, socket.username);
+      io.sockets.emit("kicked", room, user, socket.username);
       //Update user list for room.
-      io.sockets.emit(
-        "updateusers",
-        kickObj.room,
-        rooms[kickObj.room].users,
-        rooms[kickObj.room].ops
-      );
+      io.sockets.emit("updateusers", room, r.users, r.ops, r.banned);
       fn(true);
     } else {
       fn(false); // Send back failed, debugging..
@@ -226,23 +253,27 @@ io.on("connection", function (socket) {
 
   //When a user tries to op another user this gets performed.
   socket.on("op", function (opObj, fn) {
-    console.log(
-      socket.username + " opped " + opObj.user + " from " + opObj.room
-    );
-    if (rooms[opObj.room].ops[socket.username] !== undefined) {
-      //Remove the user from the room roster.
-      delete rooms[opObj.room].users[opObj.user];
+    if (!socket.username) {
+      console.log("op: User not authenticated");
+      return fn(false); // Adduser hasn't been called
+    }
+    if (!opObj) {
+      console.log("op: no payload");
+      return fn(false); // No payload
+    }
+    const { room, user } = opObj;
+    if (!room || !user) {
+      console.log("op: wrong payload", opObj);
+      return fn(false); // Wrong payload
+    }
+    const r = rooms[room];
+    if (r.ops[socket.username] !== undefined) {
       //Op the user.
-      rooms[opObj.room].ops[opObj.user] = opObj.user;
+      r.addOp(user);
       //Broadcast to the room who got opped.
-      io.sockets.emit("opped", opObj.room, opObj.user, socket.username);
+      io.sockets.emit("opped", room, user, socket.username);
       //Update user list for room.
-      io.sockets.emit(
-        "updateusers",
-        opObj.room,
-        rooms[opObj.room].users,
-        rooms[opObj.room].ops
-      );
+      io.sockets.emit("updateusers", room, r.users, r.ops, r.banned);
       fn(true);
     } else {
       fn(false); // Send back failed, debugging..
@@ -251,24 +282,28 @@ io.on("connection", function (socket) {
 
   //When a user tries to deop another user this gets performed.
   socket.on("deop", function (deopObj, fn) {
-    console.log(
-      socket.username + " deopped " + deopObj.user + " from " + deopObj.room
-    );
+    if (!socket.username) {
+      console.log("deop: User not authenticated");
+      return fn(false); // Adduser hasn't been called
+    }
+    if (!deopObj) {
+      console.log("deop: no payload");
+      return fn(false); // No payload
+    }
+    const { room, user } = deopObj;
+    if (!room || !user) {
+      console.log("deop: wrong payload", deopObj);
+      return fn(false); // Wrong payload
+    }
+    const r = rooms[room];
     //If user is OP
-    if (rooms[deopObj.room].ops[socket.username] !== undefined) {
-      //Remove the user from the room op roster.
-      delete rooms[deopObj.room].ops[deopObj.user];
+    if (r.ops[socket.username] !== undefined) {
       //Add the user to the room roster.
-      rooms[deopObj.room].users[deopObj.user] = deopObj.user;
+      r.deop(user);
       //Broadcast to the room who got opped.
-      io.sockets.emit("deopped", deopObj.room, deopObj.user, socket.username);
+      io.sockets.emit("deopped", room, user, socket.username);
       //Update user list for room.
-      io.sockets.emit(
-        "updateusers",
-        deopObj.room,
-        rooms[deopObj.room].users,
-        rooms[deopObj.room].ops
-      );
+      io.sockets.emit("updateusers", room, r.users, r.ops, r.banned);
       fn(true);
     } else {
       fn(false); // Send back failed, debugging..
@@ -277,19 +312,28 @@ io.on("connection", function (socket) {
 
   //Handles banning the user from a room.
   socket.on("ban", function (banObj, fn) {
-    if (rooms[banObj.room].ops[socket.username] !== undefined) {
+    if (!socket.username) {
+      console.log("ban: User not authenticated");
+      return fn(false); // Adduser hasn't been called
+    }
+    if (!banObj) {
+      console.log("ban: no payload");
+      return fn(false); // No payload
+    }
+    const { room, user } = banObj;
+    if (!room || !user) {
+      console.log("ban: wrong payload", banObj);
+      return fn(false); // Wrong payload
+    }
+    const r = rooms[room];
+    if (r.ops[socket.username] !== undefined) {
       //Remove the channel from the user in the global user roster.
-      delete users[banObj.user].channels[banObj.room];
+      delete users[user].channels[room];
       //Add the user to the ban list and remove him from the room user roster.
-      rooms[banObj.room].banUser(banObj.user);
+      r.banUser(user);
       //Kick the user from the room.
-      io.sockets.emit("banned", banObj.room, banObj.user, socket.username);
-      io.sockets.emit(
-        "updateusers",
-        banObj.room,
-        rooms[banObj.room].users,
-        rooms[banObj.room].ops
-      );
+      io.sockets.emit("banned", room, user, socket.username);
+      io.sockets.emit("updateusers", room, r.users, r.ops, r.banned);
       fn(true);
     }
     fn(false);
@@ -297,9 +341,22 @@ io.on("connection", function (socket) {
 
   //Handles unbanning the user.
   socket.on("unban", function (unbanObj, fn) {
-    if (rooms[unbanObj.room].ops[socket.username] !== undefined) {
+    if (!socket.username) {
+      console.log("unban: User not authenticated");
+      return fn(false); // Adduser hasn't been called
+    }
+    if (!unbanObj) {
+      console.log("unban: no payload");
+      return fn(false); // No payload
+    }
+    const { room, user } = unbanObj;
+    if (!room || !user) {
+      console.log("unban: wrong payload", unbanObj);
+      return fn(false); // Wrong payload
+    }
+    if (rooms[room].ops[socket.username] !== undefined) {
       //Remove the user from the room ban list.
-      delete rooms[unbanObj.room].banned[unbanObj.user];
+      delete rooms[room].banned[user];
       fn(true);
     }
     fn(false);
@@ -324,16 +381,24 @@ io.on("connection", function (socket) {
 
   //Sets topic for room.
   socket.on("settopic", function (topicObj, fn) {
+    if (!socket.username) {
+      console.log("settopic: User not authenticated");
+      return fn(false); // Adduser hasn't been called
+    }
+    if (!topicObj) {
+      console.log("settopic: no payload");
+      return fn(false); // No payload
+    }
+    const { room, topic } = topicObj;
+    if (!room || !topic) {
+      console.log("settopic: wrong payload", topicObj);
+      return fn(false); // Wrong payload
+    }
     //If user is OP
-    if (rooms[topicObj.room].ops[socket.username] !== undefined) {
-      rooms[topicObj.room].setTopic(topicObj.topic);
+    if (rooms[room].ops[socket.username] !== undefined) {
+      rooms[room].setTopic(topic);
       //Broadcast to room that the user changed the topic.
-      io.sockets.emit(
-        "updatetopic",
-        topicObj.room,
-        topicObj.topic,
-        socket.username
-      );
+      io.sockets.emit("updatetopic", room, topic, socket.username);
       fn(true);
     }
     //Return false if topic was not set.
@@ -342,9 +407,22 @@ io.on("connection", function (socket) {
 
   //Password locks the room.
   socket.on("setpassword", function (passwordObj, fn) {
+    if (!socket.username) {
+      console.log("setpassword: User not authenticated");
+      return fn(false); // Adduser hasn't been called
+    }
+    if (!passwordObj) {
+      console.log("setpassword: no payload");
+      return fn(false); // No payload
+    }
+    const { room, password } = passwordObj;
+    if (!room || !password) {
+      console.log("setpassword: wrong payload", passwordObj);
+      return fn(false); // Wrong payload
+    }
     //If user is OP
-    if (rooms[passwordObj.room].ops[socket.username] !== undefined) {
-      rooms[passwordObj.room].setPassword(passwordObj.password);
+    if (rooms[room].ops[socket.username] !== undefined) {
+      rooms[room].setPassword(password);
       fn(true);
     }
     fn(false);
@@ -352,8 +430,21 @@ io.on("connection", function (socket) {
 
   //Unlocks the room.
   socket.on("removepassword", function (remObj, fn) {
-    if (rooms[remObj.room].ops[socket.username] !== undefined) {
-      rooms[remObj.room].clearPassword();
+    if (!socket.username) {
+      console.log("removepassword: User not authenticated");
+      return fn(false); // Adduser hasn't been called
+    }
+    if (!remObj) {
+      console.log("removepassword: no payload");
+      return fn(false); // No payload
+    }
+    const { room } = remObj;
+    if (!room) {
+      console.log("removepassword: wrong payload", remObj);
+      return fn(false); // Wrong payload
+    }
+    if (rooms[room].ops[socket.username] !== undefined) {
+      rooms[room].clearPassword();
       fn(true);
     }
     fn(false);
@@ -361,42 +452,71 @@ io.on("connection", function (socket) {
 });
 
 //Define the Room class/object.
-function Room() {
-  (this.users = {}),
+function Room(name) {
+  (this.name = name),
+    (this.users = {}),
     (this.ops = {}),
+    (this.opsHistory = {}),
     (this.banned = {}),
     (this.messageHistory = []),
     (this.topic = "No topic has been set for room.."),
     (this.locked = false),
     (this.password = ""),
+    (this.removeUser = function (user) {
+      if (!user) return false;
+      delete this.users[user];
+      delete this.ops[user];
+      return true;
+    }),
+    (this.addOp = function (user) {
+      if (!user) return false;
+      if (this.users[user]) delete this.users[user];
+      this.ops[user] = user;
+      this.opsHistory[user] = user;
+      return true;
+    }),
+    (this.deop = function (user) {
+      if (!user) return false;
+      if (this.ops[user]) delete this.ops[user];
+      if (this.opsHistory[user]) delete this.opsHistory[user];
+      this.users[user] = user;
+      return true;
+    }),
     (this.addUser = function (user) {
-      user !== undefined
-        ? (this.users[user] = user)
-        : console.log("ERROR: add user");
+      if (!user) return false;
+      if (this.banned[user]) return false;
+      if (this.opsHistory[user]) {
+        this.ops[user] = user;
+        return true;
+      }
+      this.users[user] = user;
+      return true;
     });
   this.banUser = function (user) {
-    user !== undefined
-      ? (this.banned[user] = user)
-      : console.log("ERROR: ban user 1");
-    this.users[user] == user
-      ? delete this.users[user]
-      : console.log("ERROR: ban user 2");
+    if (!user) return false;
+    this.banned[user] = user;
+    if (this.users[user]) delete this.users[user];
+    if (this.ops[user]) {
+      delete this.ops[user];
+      delete this.opsHistory[user];
+    }
+    return true;
   };
   this.addMessage = function (message) {
-    message !== undefined
-      ? this.messageHistory.push(message)
-      : console.log("ERROR: add message");
+    if (!message) return false;
+    this.messageHistory.push(message);
+    return true;
   };
   this.setTopic = function (topic) {
-    topic !== undefined
-      ? (this.topic = topic)
-      : console.log("ERROR: set topic");
+    if (!topic) return false;
+    this.topic = topic;
+    return true;
   };
   this.setPassword = function (pass) {
-    pass !== undefined
-      ? (this.password = pass)
-      : console.log("ERROR: set pass");
+    if (!pass) return false;
+    this.password = pass;
     this.locked = true;
+    return true;
   };
   this.clearPassword = function () {
     this.password = "";

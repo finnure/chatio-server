@@ -1,10 +1,13 @@
 {
-	"name": "chatserver",
-	"type": "module",
-	"description": "WEPO Chat client assignment",
-	"version": "0.0.1",
-	"dependencies": {
-		"express": "4.18.2",
-		"socket.io": "4.6.1"
-	}
+  "name": "chatserver",
+  "type": "module",
+  "description": "WEPO Chat client assignment",
+  "version": "0.0.1",
+  "scripts": {
+    "start": "node chatserver.js"
+  },
+  "dependencies": {
+    "express": "4.18.2",
+    "socket.io": "4.6.1"
+  }
 }
