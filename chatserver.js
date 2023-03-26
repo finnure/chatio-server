@@ -152,18 +152,15 @@ io.on("connection", function (socket) {
       console.log("privatemsg: no payload");
       return fn(false); // no payload
     }
-    if (!msgObj.message) {
+    const { nick, message } = msgObj;
+    if (!message || !nick) {
       console.log("privatemsg: wrong payload", msgObj);
       return fn(false); // Missing data in payload
     }
     //If user exists in global user list.
-    if (users[msgObj.nick] !== undefined) {
+    if (users[nick] !== undefined) {
       //Send the message only to this user.
-      users[msgObj.nick].socket.emit(
-        "recv_privatemsg",
-        socket.username,
-        msgObj.message
-      );
+      users[nick].socket.emit("recv_privatemsg", socket.username, message);
       //Callback recieves true.
       fn(true);
     }
