@@ -354,9 +354,11 @@ io.on("connection", function (socket) {
       console.log("unban: wrong payload", unbanObj);
       return fn(false); // Wrong payload
     }
-    if (rooms[room].ops[socket.username] !== undefined) {
+    const r = rooms[room];
+    if (r.ops[socket.username] !== undefined) {
       //Remove the user from the room ban list.
-      delete rooms[room].banned[user];
+      delete r.banned[user];
+      io.sockets.emit("updateusers", room, r.users, r.ops, r.banned);
       fn(true);
     }
     fn(false);
